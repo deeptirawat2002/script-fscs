@@ -1,90 +1,211 @@
-'''
-Only sort_code field is failing
-'''
-
-import requests
-from bs4 import BeautifulSoup
+# Cell 1: Load main FSCS CSV file
 import pandas as pd
-from datetime import datetime
-import time
-import random
+import re
 
-def scrape_oaknorth_reviews():
-    # List to store review data
-    reviews_data = []
-    
-    # Base URL for OakNorth Bank Trustpilot reviews
-    base_url = "https://www.trustpilot.com/review/www.oaknorth.co.uk?stars=1,2,3&page={}"
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    
-    # Loop through pages
-    for page in range(1, 100):
-        try:
-            # Get the page - Added verify=False to bypass SSL verification
-            response = requests.get(base_url.format(page), headers=headers, verify=False)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Find all review containers
-            reviews = soup.find_all('article', class_='review')
-            
-            if not reviews:
-                break
-                
-            for review in reviews:
-                try:
-                    # Extract review data
-                    username = review.find('span', class_='consumer-info__name').text.strip()
-                    
-                    # Get review date
-                    date_element = review.find('time')
-                    review_date = date_element['datetime'] if date_element else 'Not found'
-                    
-                    # Get review content
-                    comment = review.find('p', class_='review-content__text').text.strip()
-                    
-                    # Get company reply if exists
-                    reply_container = review.find('div', class_='brand-company-reply')
-                    company_reply = ''
-                    reply_date = ''
-                    
-                    if reply_container:
-                        company_reply = reply_container.find('p').text.strip()
-                        reply_time = reply_container.find('time')
-                        reply_date = reply_time['datetime'] if reply_time else 'Not found'
-                    
-                    # Add to reviews list
-                    reviews_data.append({
-                        'Username': username,
-                        'Date': review_date,
-                        'Comment': comment,
-                        'Company Reply': company_reply,
-                        'Reply Date': reply_date
-                    })
-                    
-                except Exception as e:
-                    print(f"Error processing review: {e}")
-                    continue
-            
-            # Add delay to be respectful to the website
-            time.sleep(random.uniform(2, 4))
-            
-        except Exception as e:
-            print(f"Error processing page {page}: {e}")
-            continue
-            
-    # Create DataFrame and save to CSV
-    df = pd.DataFrame(reviews_data)
-    df.to_csv('oaknorth_reviews.csv', index=False, encoding='utf-8-sig')
-    return df
+file_path = "fscs_scv_tables.xlsx"
+data_inputs_df = pd.read_excel(file_path, sheet_name="Data inputs")
 
-# Run the scraper
-if __name__ == "__main__":
-    # Suppress SSL verification warnings
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    reviews_df = scrape_oaknorth_reviews()
-    print(f"Scraped {len(reviews_df)} reviews successfully!")
+# Cell 2: Define validation functions and logic
+def is_alphanumeric(value):
+   # Modified to accept parentheses, periods, and additional characters
+   return bool(re.fullmatch(r"[A-Za-z0-9 '\-\(\)\.,]+", str(value))) if pd.notna(value) else True
+
+def is_alpha(value):
+   return bool(re.fullmatch(r"[A-Za-z '-]+", str(value))) if pd.notna(value) else True
+
+def is_numeric(value):
+   try:
+       # Convert scientific notation or any number format to string and remove any spaces
+       if isinstance(value, (int, float)):
+           cleaned_value = f"{value:.0f}".strip()
+       else:
+           cleaned_value = str(value).strip().replace(" ", "")
+       return bool(re.match(r'^[0-9]+$', cleaned_value)) if pd.notna(value) else True
+   except:
+       return False
+
+def is_decimal(value):
+   return bool(re.fullmatch(r'\d+\.\d+', str(value))) if pd.notna(value) else True
+
+def is_valid_date(value):
+   return bool(re.fullmatch(r'\d{2}\d{2}\d{4}', str(value))) if pd.notna(value) else True
+
+def is_valid_email(value):
+   # Basic email validation pattern
+   email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+   return bool(re.match(email_pattern, str(value))) if pd.notna(value) else True
+
+validation_functions = {
+   'AlphaNumeric': is_alphanumeric,
+   'Alpha': is_alpha,
+   'Numeric': is_numeric,
+   'Decimal': is_decimal,
+   'Email': is_valid_email
+}
+
+def validate_file(file_path, rules_df):
+   new_xls = pd.ExcelFile(file_path)
+   new_data_df = new_xls.parse(new_xls.sheet_names[0]) 
+   
+   formatted_output = []
+   seen_values = set()
+   seen_account_numbers = set()
+   
+   valid_product_types = {'IAA', 'ISA', 'NA', 'FD1', 'FD2', 'FD4', 'Other'}
+   valid_exclusion_types = {'HMTS', 'LEGDIS', 'LEGDOR', 'BEN'}
+
+   for index, row in new_data_df.iterrows():
+       data_row = row.copy() 
+       validation_row = []  
+       
+       individual_status = "Individual" if pd.notna(row.get("title")) else ""
+       
+       for col_name in row.index:
+           if col_name in rules_df["Name in File"].values and col_name in new_data_df.columns:
+               rule = rules_df[rules_df["Name in File"] == col_name].iloc[0]
+               max_length = int(rule["Max Number of Characters"]) if pd.notna(rule["Max Number of Characters"]) else None
+               data_type = rule["Type of data"]
+               mandatory = rule["Mandate or not"] == "Yes"
+
+               value = row[col_name]
+               str_value = str(value) if pd.notna(value) else ""
+               errors = []
+
+               # Account number uniqueness check
+               if col_name == "account_number" and pd.notna(value):
+                   if value in seen_account_numbers:
+                       errors.append("Duplicate Account Number")
+                   else:
+                       seen_account_numbers.add(value)
+
+               # Product type validation
+               if col_name == "product_type" and pd.notna(value):
+                   if value not in valid_product_types:
+                       errors.append("Invalid Product Type")
+
+               # Exclusion type validation
+               if col_name == "exclusion_type" and pd.notna(value):
+                   if value not in valid_exclusion_types:
+                       errors.append("Invalid Exclusion Type")
+
+               # Special handling for numeric fields
+               if col_name in ["sort_code", "account_holder_indicator", "single_customer_view_record",
+                              "account_balance_in_sterling", "authorised_negative_balances", 
+                              "account_balance_in_original_currency",
+                              "exchange_rate", "original_account_balance_before_interest"]:
+                   if pd.notna(value):
+                       try:
+                           if col_name == "sort_code":
+                               # First convert to string and remove any spaces/formatting
+                               str_val = str(value).strip()
+                               # Now force numeric conversion to handle "text formatted numbers"
+                               num_val = int(float(str_val))
+                               # Convert back to string to check length
+                               clean_val = str(num_val)
+                               if len(clean_val) > 6:  # Changed from != to >
+                                   errors.append("Exceeds Max Length")
+                           else:
+                               # For other numeric fields
+                               num_value = pd.to_numeric(str(value).strip())
+                               str_val = str(num_value)
+                               if max_length and len(str_val.replace(" ", "").replace("-", "")) > max_length:
+                                   errors.append("Exceeds Max Length")
+                       except:
+                           errors.append(f"Invalid Numeric Format")
+
+               # Length validation - for other fields
+               elif max_length and len(str_value) > max_length:
+                   errors.append("Exceeds Max Length")
+
+               # Data type validation
+               if col_name == "email_address" and pd.notna(value):
+                   if not is_valid_email(value):
+                       errors.append("Invalid Email Format")
+               elif col_name == "main_phone_number":
+                   if pd.notna(value):
+                       if isinstance(value, (int, float)):
+                           str_val = f"{value:.0f}"
+                           if not str_val.isdigit():
+                               errors.append("Invalid Phone Number Format")
+                       else:
+                           if not is_numeric(value):
+                               errors.append("Invalid Phone Number Format")
+               # Special handling for account_number and other alphanumeric fields that can be numeric
+               elif data_type == 'AlphaNumeric':
+                   if pd.notna(value):
+                       # Pass if it's either numeric or alphanumeric
+                       if not (is_numeric(value) or is_alphanumeric(value)):
+                           errors.append(f"Invalid {data_type} Format")
+               elif data_type in validation_functions and not validation_functions[data_type](value):
+                   errors.append(f"Invalid {data_type} Format")
+               
+               # Individual-specific validations
+               if col_name == "customer_first_forename":
+                   if individual_status == "Individual" and pd.isna(value):
+                       errors.append("Mandatory for Individual")
+                   else:
+                       mandatory = False
+               
+               if col_name == "other_national_identity_number":
+                   if individual_status == "Individual" and pd.isna(value):
+                       errors.append("Mandatory for Individual")
+                   else:
+                       mandatory = False
+               
+               if col_name == "other_national_identifier":
+                   if individual_status == "Individual" and "other_national_identity_number" in new_data_df.columns:
+                       if pd.notna(new_data_df.loc[index, "other_national_identity_number"]):
+                           if pd.isna(value):
+                               errors.append("Mandatory if other_national_identity_number is provided")
+                           elif value not in ["NID", "DL", "O"]:
+                               errors.append("Invalid Identifier Type")
+                   else:
+                       mandatory = False
+               
+               if col_name == "date_of_birth" and individual_status == "Individual" and not is_valid_date(value):
+                   errors.append("Invalid Date Format (Should be DDMMYYYY)")
+               
+               # Modified address line validations
+               if col_name == "address_line_3":
+                   higher_lines = ["address_line_4", "address_line_5", "address_line_6"]
+                   if any(pd.notna(row.get(col)) for col in higher_lines if col in new_data_df.columns):
+                       if pd.isna(value):
+                           errors.append("Mandatory if address_line_4 or address_line_5 is populated")
+                   else:
+                       mandatory = False
+               
+               if col_name == "address_line_4":
+                   higher_lines = ["address_line_5", "address_line_6"]
+                   if any(pd.notna(row.get(col)) for col in higher_lines if col in new_data_df.columns):
+                       if pd.isna(value):
+                           errors.append("Mandatory if address_line_5 or address_line_6 is populated")
+                   else:
+                       mandatory = False
+               
+               if col_name == "address_line_5":
+                   if "address_line_6" in new_data_df.columns and pd.notna(row.get("address_line_6")):
+                       if pd.isna(value):
+                           errors.append("Mandatory if address_line_6 is populated")
+                   else:
+                       mandatory = False
+               
+               if mandatory and pd.isna(value):
+                   errors.append("Missing Mandatory Value")
+               
+               validation_result = "Fail - " + ", ".join(errors) if errors else "Pass"
+           else:
+               validation_result = ""
+           
+           validation_row.append(validation_result)
+       
+       data_row["Individual_Status"] = individual_status
+       formatted_output.append(data_row)
+       formatted_output.append(pd.Series(validation_row, index=row.index))  
+   
+   formatted_df = pd.DataFrame(formatted_output).reset_index(drop=True)
+   return formatted_df
+
+# Execute validation
+file_to_validate = "accountinfo.xlsx"
+validated_results = validate_file(file_to_validate, data_inputs_df)
+validated_results.to_excel('accountinfo-3rd.xlsx', index=False)
