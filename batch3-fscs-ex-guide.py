@@ -166,11 +166,6 @@ def validate_file(file_path, rules_df):
                 value = row[col_name]
                 str_value = str(value) if pd.notna(value) else ""
                 errors = []
-
-                # Length validations for specific fields
-                if col_name == 'national_insurance_number' and pd.notna(value):
-                    if len(str_value) != 9:
-                        errors.append("Must be exactly 9 characters")
                 
                 if col_name == 'sort_code' and pd.notna(value):
                     try:
@@ -195,10 +190,7 @@ def validate_file(file_path, rules_df):
                     line_num = int(col_name[-1])
                     next_lines = [f'address_line_{i}' for i in range(line_num + 1, 7)]
                     if any(pd.notna(row.get(next_line)) for next_line in next_lines) and pd.isna(value):
-                        errors.append(f"Mandatory when address line {line_num + 1} or higher is populated")
-
-                # Address line continuity check
-                
+                        errors.append(f"Mandatory when address line {line_num + 1} or higher is populated")                
 
                     # Care of address check
                     if line_num == 1 and 'C/O' in str_value.upper():
@@ -209,17 +201,14 @@ def validate_file(file_path, rules_df):
                     if str(value) not in valid_product_types:
                         errors.append("Invalid product type")
 
-                # Account holder indicator validation
-                
+                # Account branch jurisdiction validation
+                if col_name == "account_branch_jurisdiction" and pd.notna(value):
+                    if str(value).upper() not in ["GBR", "GIB"]:
+                        errors.append("Invalid branch jurisdiction - Must be GBR or GIB")
 
                 # Currency validation
                
 
-                # Special handling for transferable_eligible_deposit
-                if col_name == 'transferable_eligible_deposit':
-                    if mandatory and not is_exclusion_file:  # Only mandatory for non-exclusion files
-                        if pd.isna(value):
-                            errors.append("Mandatory for non-exclusion files")
 
                 # Special handling for compensatable_amount
                 if col_name == 'compensatable_amount':
@@ -259,8 +248,8 @@ def validate_file(file_path, rules_df):
 
 if __name__ == "__main__":
     # Get the downloads folder path and specify the fscs subfolder 
-    downloads_path = Path.home() / "Downloads" / "fscs-test"
-    res_path = Path.home() / "Downloads" / "fscs-test" 
+    downloads_path = Path.home() / "Downloads" / "fscs-testing"
+    res_path = Path.home() / "Downloads" / "fscs-testing" / "results" 
     
     # Get all Excel files in the fscs files directory
     excel_files = [f for f in os.listdir(downloads_path) 
